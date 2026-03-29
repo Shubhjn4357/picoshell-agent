@@ -186,6 +186,7 @@ GitHub Actions is configured in `.github/workflows/android.yml`.
 The workflow:
 
 - Builds the debug APK on pushes, PRs, and manual runs
+- Normalizes the Gradle wrapper permission on Linux runners before invoking it
 - Uploads `debug.apk` as an artifact
 - Always prepares release signing material in CI
 - Uses repository signing secrets when available
@@ -213,6 +214,7 @@ Important CI signing note:
 
 - Generated CI signing keys are ephemeral and only stable for that one run
 - Use the repository signing secrets if you need consistent package signing across releases and upgrades
+- The workflow opts JavaScript-based GitHub Actions into Node 24 ahead of the 2026 runner default switch
 
 ## Step-By-Step Coverage
 
