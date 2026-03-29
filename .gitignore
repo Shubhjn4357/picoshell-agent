@@ -1,0 +1,49 @@
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Gradle and Kotlin
+.gradle/
+.gradle-user/
+.gradle-bootstrap/
+.kotlin/
+local.properties
+.gradletasknamecache
+
+# Build outputs
+build/
+**/build/
+out/
+**/out/
+captures/
+
+# Temporary files
+tmp/
+temp/
+.tmp/
+.temp/
+**/tmp/
+**/temp/
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+*.swp
+*.swo
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Crash dumps
+hs_err_pid*
+replay_pid*
+
+# Local signing material
+signing/
+*.jks
+*.keystore

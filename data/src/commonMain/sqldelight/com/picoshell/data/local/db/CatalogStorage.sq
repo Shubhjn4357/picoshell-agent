@@ -1,0 +1,58 @@
+CREATE TABLE model_installation (
+  model_id TEXT NOT NULL PRIMARY KEY,
+  name TEXT NOT NULL,
+  format TEXT NOT NULL,
+  source_url TEXT NOT NULL,
+  category TEXT NOT NULL,
+  status TEXT NOT NULL,
+  progress REAL NOT NULL DEFAULT 0.0,
+  local_path TEXT,
+  notes TEXT
+);
+
+CREATE TABLE agent_run (
+  run_id TEXT NOT NULL PRIMARY KEY,
+  prompt TEXT NOT NULL,
+  output TEXT NOT NULL,
+  status TEXT NOT NULL,
+  engine TEXT NOT NULL,
+  created_at_epoch_ms INTEGER NOT NULL
+);
+
+allStoredModels:
+SELECT model_id, name, format, source_url, category, status, progress, local_path, notes
+FROM model_installation
+ORDER BY name ASC;
+
+storedModelById:
+SELECT model_id, name, format, source_url, category, status, progress, local_path, notes
+FROM model_installation
+WHERE model_id = ?;
+
+upsertModelInstallation:
+INSERT OR REPLACE INTO model_installation(
+  model_id,
+  name,
+  format,
+  source_url,
+  category,
+  status,
+  progress,
+  local_path,
+  notes
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+allAgentRuns:
+SELECT run_id, prompt, output, status, engine, created_at_epoch_ms
+FROM agent_run
+ORDER BY created_at_epoch_ms DESC;
+
+insertAgentRun:
+INSERT OR REPLACE INTO agent_run(
+  run_id,
+  prompt,
+  output,
+  status,
+  engine,
+  created_at_epoch_ms
+) VALUES (?, ?, ?, ?, ?, ?);

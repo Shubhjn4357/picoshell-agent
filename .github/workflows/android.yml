@@ -1,0 +1,283 @@
+name: Android
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android packages
+        run: sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Assemble debug
+        run: ./gradlew :composeApp:assembleDebug
+
+      - name: Upload debug APK artifact
+        if: ${{ always() && hashFiles('composeApp/build/outputs/apk/debug/composeApp-debug.apk') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug.apk
+          path: composeApp/build/outputs/apk/debug/composeApp-debug.apk
+
+      - name: Prepare release signing material
+        id: signing
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          keystore_path="$RUNNER_TEMP/release-signing.jks"
+          signing_source="generated"
+          key_alias="picoshell-ci-release"
+
+          if [[ -n "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" && -n "${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" && -n "${{ secrets.ANDROID_KEY_ALIAS }}" && -n "${{ secrets.ANDROID_KEY_PASSWORD }}" ]]; then
+            signing_source="provided"
+            echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > "$keystore_path"
+            store_password="${{ secrets.ANDROID_KEYSTORE_PASSWORD }}"
+            key_alias="${{ secrets.ANDROID_KEY_ALIAS }}"
+            key_password="${{ secrets.ANDROID_KEY_PASSWORD }}"
+          else
+            store_password="$(openssl rand -hex 12)"
+            key_password="$store_password"
+            keytool -genkeypair \
+              -noprompt \
+              -keystore "$keystore_path" \
+              -storetype PKCS12 \
+              -storepass "$store_password" \
+              -keypass "$key_password" \
+              -alias "$key_alias" \
+              -keyalg RSA \
+              -keysize 4096 \
+              -validity 3650 \
+              -dname "CN=PicoShell CI, OU=Android, O=PicoShell, L=CI, ST=CI, C=US"
+          fi
+
+          echo "::add-mask::$store_password"
+          echo "::add-mask::$key_password"
+
+          echo "keystore_path=$keystore_path" >> "$GITHUB_OUTPUT"
+          echo "signing_source=$signing_source" >> "$GITHUB_OUTPUT"
+          echo "key_alias=$key_alias" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "store_password<<EOF"
+            echo "$store_password"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "key_password<<EOF"
+            echo "$key_password"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Assemble signed release
+        id: signed_release
+        continue-on-error: true
+        shell: bash
+        run: |
+          ./gradlew :composeApp:assembleRelease \
+            -PRELEASE_STORE_FILE="${{ steps.signing.outputs.keystore_path }}" \
+            -PRELEASE_STORE_PASSWORD="${{ steps.signing.outputs.store_password }}" \
+            -PRELEASE_KEY_ALIAS="${{ steps.signing.outputs.key_alias }}" \
+            -PRELEASE_KEY_PASSWORD="${{ steps.signing.outputs.key_password }}"
+
+      - name: Upload signed release APK artifact
+        if: ${{ always() && hashFiles('composeApp/build/outputs/apk/release/composeApp-release.apk') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-signed.apk
+          path: composeApp/build/outputs/apk/release/composeApp-release.apk
+
+      - name: Collect build metadata
+        id: build_metadata
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          metadata_dir="build/ci"
+          mkdir -p "$metadata_dir"
+
+          debug_apk="composeApp/build/outputs/apk/debug/composeApp-debug.apk"
+          release_apk="composeApp/build/outputs/apk/release/composeApp-release.apk"
+          debug_certs_file="$metadata_dir/debug-apk-certs.txt"
+          release_certs_file="$metadata_dir/release-apk-certs.txt"
+          summary_file="$metadata_dir/build-summary.md"
+          release_notes_file="$metadata_dir/release-notes.md"
+
+          sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [[ -z "$sdk_root" ]]; then
+            echo "ANDROID_HOME or ANDROID_SDK_ROOT is required." >&2
+            exit 1
+          fi
+          apksigner="$sdk_root/build-tools/36.0.0/apksigner"
+
+          debug_sha=""
+          release_sha=""
+          debug_signer_sha256="n/a"
+          release_signer_sha256="n/a"
+
+          if [[ -f "$debug_apk" ]]; then
+            debug_sha="$(sha256sum "$debug_apk" | awk '{print $1}')"
+            "$apksigner" verify --print-certs "$debug_apk" > "$debug_certs_file"
+            debug_signer_sha256="$(awk -F': ' '/Signer #1 certificate SHA-256 digest:/ { print $2; exit }' "$debug_certs_file")"
+            if [[ -z "$debug_signer_sha256" ]]; then
+              debug_signer_sha256="n/a"
+            fi
+          fi
+
+          if [[ -f "$release_apk" ]]; then
+            release_sha="$(sha256sum "$release_apk" | awk '{print $1}')"
+            "$apksigner" verify --print-certs "$release_apk" > "$release_certs_file"
+            release_signer_sha256="$(awk -F': ' '/Signer #1 certificate SHA-256 digest:/ { print $2; exit }' "$release_certs_file")"
+            if [[ -z "$release_signer_sha256" ]]; then
+              release_signer_sha256="n/a"
+            fi
+          fi
+
+          {
+            echo "# Android Build Summary"
+            echo
+            echo "- Branch: \`${{ github.ref_name }}\`"
+            echo "- Commit: \`${{ github.sha }}\`"
+            echo "- Run: \`${{ github.run_number }}\`"
+            echo "- Signing source: \`${{ steps.signing.outputs.signing_source }}\`"
+            echo "- Release assemble outcome: \`${{ steps.signed_release.outcome }}\`"
+            echo "- Release key alias: \`${{ steps.signing.outputs.key_alias }}\`"
+            echo
+            echo "## Debug APK"
+            if [[ -f "$debug_apk" ]]; then
+              echo "- Status: available"
+              echo "- Path: \`$debug_apk\`"
+              echo "- SHA-256: \`$debug_sha\`"
+              echo "- Signer SHA-256: \`$debug_signer_sha256\`"
+            else
+              echo "- Status: missing"
+            fi
+            echo
+            echo "## Release APK"
+            if [[ -f "$release_apk" ]]; then
+              echo "- Status: available"
+              echo "- Path: \`$release_apk\`"
+              echo "- SHA-256: \`$release_sha\`"
+              echo "- Signer SHA-256: \`$release_signer_sha256\`"
+            else
+              echo "- Status: missing"
+            fi
+            echo
+            if [[ "${{ steps.signing.outputs.signing_source }}" == "generated" ]]; then
+              echo "CI generated an ephemeral PKCS12 keystore for this run. Use repository secrets if you need a stable signing identity across releases."
+            else
+              echo "CI used the repository-provided signing secrets."
+            fi
+            echo
+            if [[ -f "$debug_certs_file" ]]; then
+              echo "## Debug Signer Details"
+              echo '```text'
+              cat "$debug_certs_file"
+              echo '```'
+              echo
+            fi
+            if [[ -f "$release_certs_file" ]]; then
+              echo "## Release Signer Details"
+              echo '```text'
+              cat "$release_certs_file"
+              echo '```'
+            fi
+          } > "$summary_file"
+
+          {
+            echo "Automated Android build for \`${{ github.ref_name }}\`."
+            echo
+            echo "- Commit: \`${{ github.sha }}\`"
+            echo "- Run: \`${{ github.run_number }}\`"
+            echo "- Signing source: \`${{ steps.signing.outputs.signing_source }}\`"
+            echo "- Release assemble outcome: \`${{ steps.signed_release.outcome }}\`"
+            if [[ -f "$debug_apk" ]]; then
+              echo "- Debug APK SHA-256: \`$debug_sha\`"
+              echo "- Debug signer SHA-256: \`$debug_signer_sha256\`"
+            else
+              echo "- Debug APK: missing"
+            fi
+            if [[ -f "$release_apk" ]]; then
+              echo "- Release APK SHA-256: \`$release_sha\`"
+              echo "- Release signer SHA-256: \`$release_signer_sha256\`"
+            else
+              echo "- Release APK: missing"
+            fi
+            echo
+            if [[ "${{ steps.signing.outputs.signing_source }}" == "generated" ]]; then
+              echo "This run used a generated ephemeral signing key because repository signing secrets were not configured."
+            fi
+          } > "$release_notes_file"
+
+          cat "$summary_file" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "summary_file=$summary_file" >> "$GITHUB_OUTPUT"
+          echo "release_notes_file=$release_notes_file" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build metadata artifact
+        if: ${{ always() && hashFiles('build/ci/build-summary.md') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-metadata
+          path: build/ci/
+
+      - name: Prepare GitHub release assets
+        id: release_assets
+        if: ${{ always() && github.event_name != 'pull_request' }}
+        shell: bash
+        run: |
+          files=()
+          if [ -f "composeApp/build/outputs/apk/debug/composeApp-debug.apk" ]; then
+            files+=("composeApp/build/outputs/apk/debug/composeApp-debug.apk")
+          fi
+          if [ -f "composeApp/build/outputs/apk/release/composeApp-release.apk" ]; then
+            files+=("composeApp/build/outputs/apk/release/composeApp-release.apk")
+          fi
+          if [ -f "build/ci/build-summary.md" ]; then
+            files+=("build/ci/build-summary.md")
+          fi
+
+          {
+            echo "files<<EOF"
+            printf '%s\n' "${files[@]}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish APKs to GitHub Release
+        if: ${{ always() && github.event_name != 'pull_request' && steps.release_assets.outputs.files != '' && hashFiles('build/ci/release-notes.md') != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ci-${{ github.ref_name }}-latest
+          name: CI Build (${{ github.ref_name }})
+          prerelease: true
+          make_latest: false
+          overwrite_files: true
+          files: ${{ steps.release_assets.outputs.files }}
+          body_path: build/ci/release-notes.md
